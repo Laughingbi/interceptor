@@ -101,6 +101,7 @@ public class GlobalInterceptor implements HandlerInterceptor {// 实现HandlerIn
                 reqMaps.put(params[i].getParameterName(),request.getParameter(params[i].getParameterName()));
             }
             String reqJSON = JSONUtil.toJsonStr(reqMaps);
+            //user1需要根据自己时间情况调整
             boolean idempotent =  checkRequest("user1", methodsName, expireTime, reqJSON, excludeKey);
             if(!idempotent){
                 String path="/Error/503";
