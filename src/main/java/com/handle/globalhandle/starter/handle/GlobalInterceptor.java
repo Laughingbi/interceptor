@@ -2,13 +2,20 @@ package com.handle.globalhandle.starter.handle;
 
 import cn.hutool.core.text.StrSpliter;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.handle.globalhandle.starter.config.GolbanhandleConfig;
 import com.handle.globalhandle.starter.consts.AccessLimit;
+import com.handle.globalhandle.starter.consts.AutoIdempotent;
 import com.handle.globalhandle.starter.utils.IPUtils;
 import com.handle.globalhandle.starter.utils.RedisUtil;
+import com.handle.globalhandle.starter.utils.ReqDedupHelper;
+import org.springframework.core.MethodParameter;
+import org.springframework.util.StringUtils;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
 import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.mvc.method.RequestMappingInfo;
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import javax.annotation.Resource;
 import javax.servlet.ServletException;
@@ -16,12 +23,16 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import java.util.List;
 
 
 public class GlobalInterceptor implements HandlerInterceptor {// 实现HandlerInterceptor接口
+
+    private static final String excludeKey = "";
 
     @Resource
     RedisUtil redisUtils;
@@ -68,10 +79,55 @@ public class GlobalInterceptor implements HandlerInterceptor {// 实现HandlerIn
                 request.getRequestDispatcher(path).forward(request,response);
             }
         }
+        if(success){
+            success = AutoIdempotent(request,response,handler);
+        }
         return success;
     }
 
+    private boolean AutoIdempotent(HttpServletRequest request, HttpServletResponse response, Object handler) throws ServletException, IOException{
+        if (handler instanceof HandlerMethod) {
+            HandlerMethod hm = (HandlerMethod) handler;
+            AutoIdempotent autoIdempotent = hm.getMethodAnnotation(AutoIdempotent.class);
+            if (null == autoIdempotent) {
+               return  true;
+            }
+            long expireTime = autoIdempotent.expireTime();
+            // 获取参数名称
+            String methodsName = hm.getMethod().getName();
+            MethodParameter [] params = hm.getMethodParameters();
+            Map<String, Object> reqMaps = new HashMap<>();
+            for(int i=0; i<params.length; i++){
+                reqMaps.put(params[i].getParameterName(),request.getParameter(params[i].getParameterName()));
+            }
+            String reqJSON = JSONUtil.toJsonStr(reqMaps);
+            boolean idempotent =  checkRequest("user1", methodsName, expireTime, reqJSON, excludeKey);
+            if(!idempotent){
+                String path="/Error/503";
+                request.getRequestDispatcher(path).forward(request,response);
+                return  false;
+            }
+        }
 
+        return true;
+    }
+
+    private boolean checkRequest(String userId, String methodName, long expireTime, String reqJsonParam, String... excludeKeys){
+        final boolean isConsiderDup;
+        String dedupMD5 = new ReqDedupHelper().dedupParamMD5(reqJsonParam, excludeKeys);
+        String redisKey = "dedup:U="+userId+ "M="+methodName+"P="+dedupMD5;
+
+        long expireAt = System.currentTimeMillis() + expireTime;
+        String val = "expireAt@" + expireAt;
+
+        // NOTE:直接SETNX不支持带过期时间，所以设置+过期不是原子操作，极端情况下可能设置了就不过期了
+        if (redisUtils.set(redisKey,val, expireTime, TimeUnit.MILLISECONDS)) {
+            isConsiderDup =  false;
+        } else {
+            isConsiderDup =  true;
+        }
+        return isConsiderDup;
+    }
 
 
     private boolean interceptDDos(HttpServletRequest request, HttpServletResponse response, Object handler) throws ServletException, IOException {
